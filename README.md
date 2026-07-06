@@ -11,7 +11,6 @@ arm-none-eabi-binutils  Linker, objcopy
 stlink                  Flash via ST-Link
 python-pyserial         PC uploader script
 make                    Build automation
-
 Arch install: sudo pacman -S arm-none-eabi-gcc arm-none-eabi-binutils stlink python-pyserial make
 
 HOW IT WORKS
@@ -21,35 +20,37 @@ Two programs in flash:
   Application at 0x08004000 (480 KB)
 
 Power-on flow:
-  Power ON
-    |
-    v
-  Bootloader starts
-    |
-    +-- LED blinks 3x
-    +-- Send "BOOT" on UART
-    +-- Wait 3 seconds
-    |
-    +-- No command? ----> Jump to app at 0x08004000
-    |
-    +-- Got command? ---> Erase, write, jump
+    Power ON
+       |
+       v
+    Bootloader starts
+       |
+       +-- LED blinks 3x
+       +-- Send "BOOT" on UART
+       +-- Wait 3 seconds
+       |
+       +-- No command? ----> Jump to app at 0x08004000
+       |
+       +-- Got command? ---> Erase, write, jump
 
 THE JUMP
 --------
 Read stack pointer from 0x08004000
 Read reset handler from 0x08004004
-  |
-  v
+       |
+       v
 Check stack is in SRAM (0x20000000 to 0x20020000)
-  |
-  +-- Yes ---> Disable interrupts
-                Set SCB_VTOR = 0x08004000
-                Set stack pointer
-                Jump to app (never returns)
-  |
-  +-- No ---> Stay in bootloader
+       |
+       +-- Yes ---> Disable interrupts
+       |             Set SCB_VTOR = 0x08004000
+       |             Set stack pointer
+       |             Jump to app (never returns)
+       |
+       +-- No ---> Stay in bootloader
 
-
+Why SCB_VTOR:
+  Without it: CPU looks at 0x08000000 for interrupts = CRASH
+  With it: CPU looks at 0x08004000 for interrupts = WORKS
 
 UART PROTOCOL
 -------------
@@ -105,21 +106,5 @@ UPLOAD APP VIA UART
 3. Watch LED blink 3 times (bootloader mode)
 4. Within 3 seconds, run: make upload
    Or: python pc_tool/uploader.py app.bin /dev/ttyUSB0
-
-
-KEY CODE
---------
-UART init (115200 baud at 16 MHz):
-  Enable GPIOA clock, Enable USART1 clock
-  Set PA9 and PA10 to Alternate Function, Select AF7
-  Set baud rate: 16000000 / 115200 = 139
-  Enable transmitter, receiver, UART
-Flash erase sector:
-  Wait for not busy, Clear old sector number
-  Set new sector number, Select sector erase mode
-  Start erase, Wait for completion, Clear erase mode
-Application MUST set: SCB_VTOR = 0x08004000
-  Without this: interrupts crash into bootloader
-  With this: interrupts work in application
 
 
