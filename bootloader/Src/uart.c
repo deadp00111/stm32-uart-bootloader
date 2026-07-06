@@ -1,40 +1,49 @@
-#include "stm32f411_regs.h"
 #include "uart.h"
+#include "stm32f411_regs.h"
 
-/* USART2: PA2=TX(AF7), PA3=RX(AF7). HSI 16MHz assumed (default reset clock). */
-void uart_init(uint32_t baud)
-{
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
-    RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
+// Init UART1 on PA9 (TX) and PA10 (RX) at 115200 baud 
+void uart_init(void) {
+    /* Enable clocks */
+    RCC_AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    RCC_APB2ENR |= RCC_APB2ENR_USART1EN;
 
-    GPIOA->MODER &= ~((3U << (2*2)) | (3U << (3*2)));
-    GPIOA->MODER |=  ((2U << (2*2)) | (2U << (3*2))); /* AF mode */
-    GPIOA->AFR[0] &= ~((0xFU << (2*4)) | (0xFU << (3*4)));
-    GPIOA->AFR[0] |=  ((7U  << (2*4)) | (7U  << (3*4))); /* AF7 = USART2 */
+    // PA9, PA10 as alternate function 
+    GPIOA_MODER &= ~((3U << 18) | (3U << 20));
+    GPIOA_MODER |=  (2U << 18) | (2U << 20);
 
-    uint32_t apb1_clk = 16000000UL; /* HSI, no PLL */
-    USART2->BRR = (apb1_clk + (baud / 2U)) / baud;
-    USART2->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE;
+    /* AF7 for USART1 */
+    GPIOA_AFRH &= ~((0xFU << 4) | (0xFU << 8));
+    GPIOA_AFRH |=  (7U << 4) | (7U << 8);
+
+    GPIOA_OSPEEDR |= (3U << 18) | (3U << 20);
+
+    //115200 baud @ 16MHz HSI 
+    USART1_BRR = 139;
+
+    //Enable TX, RX, UART 
+    USART1_CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
 }
 
-void uart_send_byte(uint8_t b)
-{
-    while (!(USART2->SR & USART_SR_TXE));
-    USART2->DR = b;
+//Send one byte 
+void uart_send(uint8_t c) {
+    while (!(USART1_SR & USART_SR_TXE));
+    USART1_DR = c;
+    while (!(USART1_SR & USART_SR_TC));
 }
 
-uint8_t uart_recv_byte(void)
-{
-    while (!(USART2->SR & USART_SR_RXNE));
-    return (uint8_t)USART2->DR;
+// Receive one byte(blocking) 
+uint8_t uart_recv(void) {
+    while (!(USART1_SR & USART_SR_RXNE));
+    return (uint8_t)USART1_DR;
 }
 
-void uart_send_buf(const uint8_t *buf, uint32_t len)
-{
-    for (uint32_t i = 0; i < len; i++) uart_send_byte(buf[i]);
-}
-
-void uart_recv_buf(uint8_t *buf, uint32_t len)
-{
-    for (uint32_t i = 0; i < len; i++) buf[i] = uart_recv_byte();
+// Receive with timeout in ms, returns -1 if timeout 
+int uart_recv_timeout(uint32_t ms) {
+    volatile uint32_t count = 0;
+    while (!(USART1_SR & USART_SR_RXNE)) {
+        if (++count > (ms * 1600)) {
+            return -1;
+        }
+    }
+    return (uint8_t)USART1_DR;
 }

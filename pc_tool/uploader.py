@@ -1,65 +1,140 @@
 #!/usr/bin/env python3
 """
-UART firmware uploader for STM32F411 bootloader.
-Frame format: [0xAA][LEN_H][LEN_L][DATA...N][CRC32 4B big-endian]
+STM32F411 UART Bootloader - PC Uploader
 """
-import argparse
-import struct
-import sys
-import zlib
 
 import serial
+import struct
+import sys
+import time
 
-FRAME_START = 0xAA
-ACK = 0x06
-NACK = 0x15
-CHUNK_SIZE = 256
-MAX_RETRIES = 5
+ACK = 0x79
+NACK = 0x1F
 
-
-def build_frame(chunk: bytes) -> bytes:
-    crc = zlib.crc32(chunk) & 0xFFFFFFFF
-    return bytes([FRAME_START]) + struct.pack(">H", len(chunk)) + chunk + struct.pack(">I", crc)
-
-
-def send_firmware(port: str, filepath: str, baud: int = 115200):
-    with open(filepath, "rb") as f:
-        data = f.read()
-
-    total_chunks = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
-    print(f"Loaded {filepath}: {len(data)} bytes, {total_chunks} chunks")
-
-    ser = serial.Serial(port, baud, timeout=2)
-
-    for i in range(0, len(data), CHUNK_SIZE):
-        chunk = data[i:i + CHUNK_SIZE]
-        frame = build_frame(chunk)
-
-        for attempt in range(1, MAX_RETRIES + 1):
-            ser.write(frame)
-            resp = ser.read(1)
-            if resp == bytes([ACK]):
-                break
-            if resp == bytes([NACK]):
-                print(f"  chunk {i // CHUNK_SIZE}: NACK, retry {attempt}/{MAX_RETRIES}")
-                continue
-            print(f"  chunk {i // CHUNK_SIZE}: no response (timeout), retry {attempt}/{MAX_RETRIES}")
-        else:
-            ser.close()
-            sys.exit(f"FAILED at chunk {i // CHUNK_SIZE} after {MAX_RETRIES} retries")
-
-        pct = (i + len(chunk)) * 100 // len(data)
-        print(f"\r  progress: {pct}%", end="", flush=True)
-
-    print("\nFirmware upload complete.")
-    ser.close()
+CMD_WRITE = 0x31
+CMD_ERASE = 0x43
+CMD_GO = 0x21
 
 
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="STM32 UART bootloader uploader")
-    ap.add_argument("--port", required=True, help="e.g. /dev/ttyUSB0")
-    ap.add_argument("--file", required=True, help="path to app.bin")
-    ap.add_argument("--baud", type=int, default=115200)
-    args = ap.parse_args()
+class Bootloader:
+    def __init__(self, port='/dev/ttyUSB0', baud=115200):
+        self.ser = serial.Serial(port, baud, timeout=3)
 
-    send_firmware(args.port, args.file, args.baud)
+    def send_cmd(self, cmd):
+        """Send command and its complement, wait for ACK"""
+        self.ser.write(bytes([cmd, cmd ^ 0xFF]))
+        resp = self.ser.read(1)
+        return resp[0] == ACK if resp else False
+
+    def erase_app(self):
+        """Erase all application sectors (4,5,6,7)"""
+        print("[*] Erasing application flash...")
+        if not self.send_cmd(CMD_ERASE):
+            print("[!] Erase command failed")
+            return False
+
+        # Global erase: N=0xFF, checksum=0xFF
+        self.ser.write(bytes([0xFF, 0xFF]))
+        resp = self.ser.read(1)
+        if resp and resp[0] == ACK:
+            print("[+] Erase successful")
+            return True
+        print("[!] Erase failed")
+        return False
+
+    def write_memory(self, addr, data):
+        """Write data to flash memory"""
+        if not self.send_cmd(CMD_WRITE):
+            return False
+
+        # Send address (big-endian) + checksum
+        addr_bytes = struct.pack('>I', addr)
+        addr_cs = addr_bytes[0] ^ addr_bytes[1] ^ addr_bytes[2] ^ addr_bytes[3]
+        self.ser.write(addr_bytes + bytes([addr_cs]))
+        if self.ser.read(1)[0] != ACK:
+            return False
+
+        # Send data in chunks of 256 bytes
+        total = len(data)
+        written = 0
+
+        for i in range(0, total, 256):
+            chunk = data[i:i+256]
+            chunk = chunk.ljust(256, b'\xFF')
+
+            N = len(chunk) - 1
+            cs = N
+            for b in chunk:
+                cs ^= b
+
+            self.ser.write(bytes([N]) + chunk + bytes([cs]))
+            resp = self.ser.read(1)
+            if not resp or resp[0] != ACK:
+                print(f"\n[!] Write failed at offset {i}")
+                return False
+
+            written += len(chunk)
+            pct = (written / total) * 100
+            print(f"\r[*] Writing... {pct:.1f}%", end='', flush=True)
+
+        print()
+        return True
+
+    def go(self, addr):
+        """Jump to application"""
+        print(f"[*] Jumping to 0x{addr:08X}...")
+        if not self.send_cmd(CMD_GO):
+            return False
+
+        addr_bytes = struct.pack('>I', addr)
+        addr_cs = addr_bytes[0] ^ addr_bytes[1] ^ addr_bytes[2] ^ addr_bytes[3]
+        self.ser.write(addr_bytes + bytes([addr_cs]))
+        resp = self.ser.read(1)
+        return resp and resp[0] == ACK
+
+    def upload(self, firmware_path):
+        """Full upload sequence"""
+        print(f"[*] Opening {firmware_path}")
+        with open(firmware_path, 'rb') as f:
+            firmware = f.read()
+
+        print(f"[*] Firmware size: {len(firmware)} bytes")
+
+        # Wait for bootloader ready signal "BOOT\r\n"
+        print("[*] Waiting for bootloader...")
+        time.sleep(0.5)
+        boot_msg = self.ser.read_all()
+        if boot_msg:
+            print(f"    Bootloader: {boot_msg.decode('ascii', errors='ignore')}")
+
+        # Small delay then start sending commands
+        time.sleep(0.1)
+
+        if not self.erase_app():
+            return False
+
+        if not self.write_memory(0x08004000, firmware):
+            return False
+
+        print("[+] Write complete!")
+
+        self.go(0x08004000)
+        print("[+] Done! Jumped to application.")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python3 uploader.py <firmware.bin> [port]")
+        print("Example: python3 uploader.py app.bin /dev/ttyUSB0")
+        sys.exit(1)
+
+    firmware = sys.argv[1]
+    port = sys.argv[2] if len(sys.argv) > 2 else '/dev/ttyUSB0'
+
+    bl = Bootloader(port)
+    bl.upload(firmware)
+
+
+if __name__ == '__main__':
+    main()
+    

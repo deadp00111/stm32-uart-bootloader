@@ -1,65 +1,64 @@
-#include "stm32f411_regs.h"
 #include "flash.h"
+#include "stm32f411_regs.h"
 
-static void flash_unlock(void)
-{
-    if (FLASH->CR & FLASH_CR_LOCK) {
-        FLASH->KEYR = FLASH_KEY1;
-        FLASH->KEYR = FLASH_KEY2;
+// Wait until flash is not busy 
+static void flash_wait(void) {
+    while (FLASH_SR & FLASH_SR_BSY);
+}
+
+// Unlock flash for write/erase 
+void flash_unlock(void) {
+    if (FLASH_CR & FLASH_CR_LOCK) {
+        FLASH_KEYR = FLASH_KEY1;
+        FLASH_KEYR = FLASH_KEY2;
     }
 }
 
-static void flash_lock(void)
-{
-    FLASH->CR |= FLASH_CR_LOCK;
+// Lock flash after write/erase 
+void flash_lock(void) {
+    FLASH_CR |= FLASH_CR_LOCK;
 }
 
-/* STM32F411 sector map (sectors 0-7, 512KB device) */
-static const uint32_t sector_base[8] = {
-    0x08000000, 0x08004000, 0x08008000, 0x0800C000,
-    0x08010000, 0x08020000, 0x08040000, 0x08060000
-};
+// Erase one flash sector 
+void flash_erase_sector(uint8_t sector) {
+    flash_wait();
 
-int flash_sector_of_addr(uint32_t addr)
-{
-    for (int i = 7; i >= 0; i--)
-        if (addr >= sector_base[i]) return i;
-    return -1;
+    FLASH_CR &= ~(0xFU << FLASH_CR_SNB);
+    FLASH_CR |= (sector << FLASH_CR_SNB);
+    FLASH_CR |= FLASH_CR_SER;
+    FLASH_CR |= FLASH_CR_STRT;
+
+    flash_wait();
+    FLASH_CR &= ~FLASH_CR_SER;
 }
 
-void flash_erase_sector(uint8_t sector)
-{
-    flash_unlock();
-    while (FLASH->SR & FLASH_SR_BSY);
+// Write data to flash (must be erased first) 
+void flash_write(uint32_t addr, uint8_t *data, uint32_t len) {
+    uint32_t i;
 
-    FLASH->CR &= ~(0xFU << 3);
-    FLASH->CR |= (sector << 3) | FLASH_CR_SER;
-    FLASH->CR |= FLASH_CR_STRT;
-    while (FLASH->SR & FLASH_SR_BSY);
-    FLASH->CR &= ~FLASH_CR_SER;
+    for (i = 0; i + 3 < len; i += 4) {
+        uint32_t word = data[i] | (data[i+1] << 8) |
+                       (data[i+2] << 16) | (data[i+3] << 24);
 
-    flash_lock();
-}
+        flash_wait();
+        FLASH_CR |= FLASH_CR_PG;
+        *(volatile uint32_t *)(addr + i) = word;
+        flash_wait();
+        FLASH_CR &= ~FLASH_CR_PG;
+    }
 
-void flash_write_word(uint32_t addr, uint32_t data)
-{
-    flash_unlock();
-    while (FLASH->SR & FLASH_SR_BSY);
-
-    FLASH->CR |= FLASH_CR_PG | FLASH_CR_PSIZE_1;
-    *(volatile uint32_t *)addr = data;
-    while (FLASH->SR & FLASH_SR_BSY);
-    FLASH->CR &= ~FLASH_CR_PG;
-
-    flash_lock();
-}
-
-void flash_write_buf(uint32_t addr, const uint8_t *buf, uint32_t len)
-{
-    /* len must be multiple of 4; caller pads */
-    for (uint32_t i = 0; i < len; i += 4) {
-        uint32_t word;
-        __builtin_memcpy(&word, &buf[i], 4);
-        flash_write_word(addr + i, word);
+    //Handle remaining bytes 
+    if (i < len) {
+        uint32_t word = 0xFFFFFFFF;
+        uint32_t j;
+        for (j = 0; j < (len - i); j++) {
+            word &= ~(0xFFU << (j * 8));
+            word |= (data[i + j] << (j * 8));
+        }
+        flash_wait();
+        FLASH_CR |= FLASH_CR_PG;
+        *(volatile uint32_t *)(addr + i) = word;
+        flash_wait();
+        FLASH_CR &= ~FLASH_CR_PG;
     }
 }
